@@ -50,7 +50,7 @@ def conectar_sheets():
         sheet = gc.open_by_url(sheet_url)
 
         # SUBSTITUA 'Sheet1' pelo nome da sua aba (ex: 'Planilha1')
-        worksheet = sheet.worksheet("Sheet1")
+        worksheet = sheet.worksheet("Planilha1")
         return worksheet
     except gspread.exceptions.GSpreadException as e:
         st.error(f"Erro de conexão com a planilha. Verifique o URL e as permissões. Detalhes: {e}")
