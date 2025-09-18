@@ -44,10 +44,13 @@ def conectar_sheets():
     # Use st.secrets para acessar as credenciais de forma segura
     creds = st.secrets["gcp_service_account"]
     gc = gspread.service_account_from_dict(creds)
-    # Abra a planilha pelo URL ou título
-    # Substitua pelo URL da sua planilha
-    sheet = gc.open_by_url("https://docs.google.com/spreadsheets/d/1l0UqpIEOa4uAQPSQD_pNvT2LoaA2wvPWxh37LqCEp9M/edit?gid=0#gid=0")
-    worksheet = sheet.worksheet("Planilha1")  # Substitua 'Sheet1' pelo nome da sua aba
+
+    # SUBSTITUA ESTE URL pelo URL da sua planilha
+    sheet_url = "https://docs.google.com/spreadsheets/d/1l0UqpIEOa4uAQPSQD_pNvT2LoaA2wvPWxh37LqCEp9M/edit?gid=0#gid=0"
+    sheet = gc.open_by_url(sheet_url)
+
+    # SUBSTITUA 'Sheet1' pelo nome da sua aba (ex: 'Planilha1')
+    worksheet = sheet.worksheet("Planilha1")
     return worksheet
 
 def listar_jogadores_sheets(worksheet):
@@ -63,11 +66,14 @@ def adicionar_jogador_sheets(worksheet, nome, ano, posicao, competicao, gols, mi
     row_to_add = [nome, ano, posicao, competicao, gols, minutagem]
     worksheet.append_row(row_to_add)
 
+def remover_jogador_sheets(worksheet, row_index):
+    worksheet.delete_rows(row_index)
+
 # Título principal do aplicativo
 st.markdown('<h1 style="text-align: center; color: #990000; font-weight: bold; font-size: 2.5em;">Convocações Vasco da Gama Sub-20</h1>', unsafe_allow_html=True)
 
 # Lógica de login
-SENHA_ADMIN = st.secrets.get("admin_password", "vasco123")  # Obtém a senha de secrets, ou usa uma padrão
+SENHA_ADMIN = st.secrets.get("admin_password", "vasco123")
 modo_admin = False
 senha = st.sidebar.text_input("Senha Admin:", type="password")
 
@@ -90,7 +96,7 @@ st.sidebar.download_button(
     mime="text/csv"
 )
 
-# --- Conteúdo principal: Visualização, Adição e Remoção (condicional) ---
+# --- Conteúdo principal: Visualização ---
 col_tabela, col_grafico = st.columns([0.7, 0.3])
 
 with col_tabela:
@@ -145,7 +151,8 @@ if modo_admin:
         st.subheader("➕ Adicionar novo jogador")
         with st.form("adicionar_jogador_form"):
             nome = st.text_input("Nome do jogador").strip()
-            ano = st.selectbox("Ano da convocação", list(range(2020, 2026)))
+            # Mudei o ano da convocação para ir até 2030
+            ano = st.selectbox("Ano da convocação", list(range(2020, 2031)))
             posicao = st.selectbox("Posição", ["Goleiro", "Zagueiro", "Lateral Direito", "Lateral Esquerdo", "Volante", "Meia Central", "Meia Ofensivo", "Ponta Direita", "Ponta Esquerda", "Centroavante"])
             competicao = st.selectbox("Competição", ["Mundial", "Sul-Americano", "Outras"])
             gols = st.number_input("Gols marcados", min_value=0, step=1)
@@ -163,14 +170,20 @@ if modo_admin:
     with col_remove:
         st.subheader("🗑️ Remover jogador")
         if not df_jogadores.empty:
-            df_jogadores_com_indice = df_jogadores.reset_index().rename(columns={'index': 'id_temp'})
+            # A planilha tem cabeçalho, então o índice começa em 2
+            df_jogadores_com_indice = df_jogadores.reset_index(drop=True).reset_index().rename(columns={'index': 'linha_id'})
+            df_jogadores_com_indice['linha_id'] = df_jogadores_com_indice['linha_id'] + 2
+
             opcoes_remocao = df_jogadores_com_indice.apply(lambda j: f"{j['nome']} ({j['ano']}) - {j['posicao']}", axis=1)
+            
+            # Usa o índice temporário para remover a linha
             jogador_selecionado = st.selectbox("Selecione o jogador:", options=[None] + list(opcoes_remocao.index), format_func=lambda i: "Selecione um jogador" if i is None else opcoes_remocao.loc[i])
+            
             remover = st.button("Remover jogador selecionado")
 
             if remover and jogador_selecionado is not None:
-                row_to_delete = jogador_selecionado + 2 # +2 porque a planilha tem cabeçalho e é base 1
-                worksheet.delete_rows(row_to_delete)
+                row_to_delete = df_jogadores_com_indice.loc[jogador_selecionado, 'linha_id']
+                remover_jogador_sheets(worksheet, row_to_delete)
                 st.success(f"✅ Jogador removido com sucesso!")
                 st.experimental_rerun()
         else:
