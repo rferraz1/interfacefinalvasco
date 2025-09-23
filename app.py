@@ -92,6 +92,20 @@ def adicionar_titulos(worksheet, titulos):
         worksheet.append_rows([[t] for t in titulos])
         load_data(force=True)
 
+# ===== NOVA FUNÇÃO PARA REMOVER TÍTULOS =====
+def remover_titulo(worksheet, titulo_para_remover):
+    if worksheet and titulo_para_remover:
+        try:
+            # Encontra a primeira ocorrência do título
+            cell = worksheet.find(titulo_para_remover)
+            if cell:
+                worksheet.delete_rows(cell.row)
+                load_data(force=True)
+                return True
+        except gspread.exceptions.CellNotFound:
+            st.error(f"Título '{titulo_para_remover}' não encontrado para remoção.")
+    return False
+
 def adicionar_jogadores_massa(worksheet, df_novos):
     if worksheet and not df_novos.empty:
         colunas_ordenadas = ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem']
@@ -105,26 +119,21 @@ st.markdown('<h1 style="text-align: center; color: #000000;">Convocações Vasco
 
 load_data()
 
-# ===== LÓGICA DE LOGIN CORRIGIDA =====
+# Lógica de Login
 SENHA_ADMIN = st.secrets.get("admin_password", "depanalise")
 senha = st.sidebar.text_input("Senha Admin:", type="password")
 
-# Verifica a senha e atualiza o estado da sessão
 if senha == SENHA_ADMIN:
     st.session_state.admin_logged_in = True
 else:
-    # Se a senha estiver errada ou vazia, garante que o usuário seja deslogado
     st.session_state.admin_logged_in = False
 
-# Determina o modo admin baseado no estado da sessão
 modo_admin = st.session_state.get('admin_logged_in', False)
 
-# Exibe as mensagens de status
 if modo_admin:
     st.sidebar.success("Modo Admin Ativo!")
-elif senha:  # Mostra erro apenas se algo foi digitado e está incorreto
+elif senha:
     st.sidebar.error("Senha incorreta.")
-
 
 # Barra Lateral
 st.sidebar.header("Opções")
@@ -199,22 +208,18 @@ if modo_admin:
         with st.expander("⬆️ Adicionar em Massa (CSV)"):
             modelo_csv = pd.DataFrame([{'nome':'', 'ano':'', 'posicao':'', 'competicao':'', 'gols':'', 'minutagem':''}])
             st.download_button("Baixar modelo CSV", modelo_csv.to_csv(index=False).encode('utf-8'), 'modelo_convocados.csv', 'text/csv')
-            
             csv_file = st.file_uploader("Escolha um arquivo CSV para upload", type="csv")
             if csv_file is not None:
                 if st.button("Carregar dados do CSV"):
                     try:
-                        df_novos = pd.read_csv(csv_file)
-                        df_novos = df_novos.fillna('')
+                        df_novos = pd.read_csv(csv_file).fillna('')
                         colunas_obrigatorias = {'nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem'}
                         if colunas_obrigatorias.issubset(df_novos.columns):
                             adicionar_jogadores_massa(jogadores_ws, df_novos)
-                            st.success(f"✅ {len(df_novos)} jogadores adicionados com sucesso!")
+                            st.success(f"✅ {len(df_novos)} jogadores adicionados!")
                             st.rerun()
-                        else:
-                            st.error(f"O arquivo CSV não tem as colunas obrigatórias. Verifique o modelo.")
-                    except Exception as e:
-                        st.error(f"Ocorreu um erro ao processar o arquivo: {e}")
+                        else: st.error(f"O arquivo CSV não tem as colunas obrigatórias. Verifique o modelo.")
+                    except Exception as e: st.error(f"Ocorreu um erro ao processar o arquivo: {e}")
 
         with st.expander("🏆 Adicionar Títulos"):
             with st.form("form_add_titulos", clear_on_submit=True):
@@ -224,9 +229,22 @@ if modo_admin:
                 if st.form_submit_button("Adicionar Títulos"):
                     para_add = [t for t, q in quantidades.items() for _ in range(q)]
                     if custom: para_add.append(custom)
-                    adicionar_titulos(titulos_ws, para_add)
-                    st.success("Títulos atualizados!")
-                    st.rerun()
+                    if para_add:
+                        adicionar_titulos(titulos_ws, para_add)
+                        st.success("Títulos atualizados!")
+                        st.rerun()
+
+        # ===== NOVA SEÇÃO PARA REMOVER TÍTULOS =====
+        with st.expander("🗑️ Remover Título"):
+            if lista_titulos:
+                # Mostra cada título como uma opção única para remoção
+                titulo_para_remover = st.selectbox("Selecione o título para remover:", ["Selecione..."] + lista_titulos)
+                if st.button("Remover Título Selecionado") and titulo_para_remover != "Selecione...":
+                    if remover_titulo(titulos_ws, titulo_para_remover):
+                        st.success(f"✅ Título '{titulo_para_remover}' removido!")
+                        st.rerun()
+            else:
+                st.info("Nenhum título para remover.")
 
         with st.expander("🗑️ Remover Jogador"):
             df_remover = df_jogadores.copy()
