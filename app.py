@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
 import gspread
+from collections import Counter
 
-# ⚽ Configuração da página com layout amplo
+# ⚽ Configuração da página
 st.set_page_config(
     page_title="Seleção Sub-20 - Vasco",
     page_icon="⚽",
@@ -12,178 +13,229 @@ st.set_page_config(
 # 🎨 Estilo personalizado
 st.markdown("""
     <style>
-    /* Estilo para o corpo da página e todos os elementos de texto */
     body, * {
         color: #000000 !important;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
-
-    /* Cores e estilos do Vasco */
-    h2, h3 {
-        color: #990000;
-        font-weight: bold;
-    }
-
-    /* Ajuste da largura para usar a tela inteira */
-    .stApp {
-        background-color: #ffffff;
-        max-width: 100vw;
-        padding-left: 1rem;
-        padding-right: 1rem;
-    }
-
-    /* Centralizar o título H1 */
-    .st-emotion-cache-1dp5k74 {
-        text-align: center;
-    }
+    h2, h3 { color: #000000; font-weight: bold; }
+    .stApp { background-color: #ffffff; }
     </style>
 """, unsafe_allow_html=True)
 
-# 🔧 Funções para interagir com o Google Sheets
+# --- Funções de Conexão e Leitura ---
+
+@st.cache_resource
 def conectar_sheets():
     try:
         creds = st.secrets["gcp_service_account"]
         gc = gspread.service_account_from_dict(creds)
-
-        # SUBSTITUA ESTE URL pelo URL da sua planilha
-        sheet_url = "https://docs.google.com/spreadsheets/d/1l0UqpIEOa4uAQPSQD_pNvT2LoaA2wvPWxh37LqCEp9M/edit?gid=0#gid=0"
-        sheet = gc.open_by_url(sheet_url)
-
-        # SUBSTITUA 'Sheet1' pelo nome da sua aba (ex: 'Planilha1')
-        worksheet = sheet.worksheet("Planilha1")
-        return worksheet
-    except gspread.exceptions.GSpreadException as e:
-        st.error(f"Erro de conexão com a planilha. Verifique o URL e as permissões. Detalhes: {e}")
+        sheet_url = st.secrets["google_sheets"]["sheet_url"]
+        return gc.open_by_url(sheet_url)
+    except Exception as e:
+        st.error(f"Erro de conexão com a planilha. Verifique a URL e as permissões. Detalhes: {e}")
         return None
 
-def listar_jogadores_sheets(worksheet):
-    if worksheet:
-        data = worksheet.get_all_records()
-        df = pd.DataFrame(data)
-        df['ano'] = pd.to_numeric(df['ano'], errors='coerce').astype('Int64')
-        df['gols'] = pd.to_numeric(df['gols'], errors='coerce').astype('Int64')
-        df['minutagem'] = pd.to_numeric(df['minutagem'], errors='coerce').astype('Int64')
-        return df
-    return pd.DataFrame()
+def get_worksheet(sheet, name, headers):
+    try:
+        worksheet = sheet.worksheet(name)
+        if not worksheet.acell('A1').value:
+            worksheet.update('A1', [headers])
+            st.toast(f"Aba '{name}' configurada com sucesso!")
+        return worksheet
+    except gspread.exceptions.WorksheetNotFound:
+        st.error(f"Aba '{name}' não encontrada. Crie uma aba com este nome.")
+        return None
 
-def adicionar_jogador_sheets(worksheet, nome, ano, posicao, competicao, gols, minutagem):
-    if worksheet:
-        row_to_add = [nome, ano, posicao, competicao, gols, minutagem]
-        worksheet.append_row(row_to_add)
+def fetch_jogadores_data(_worksheet):
+    required_columns = ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem']
+    if not _worksheet: return pd.DataFrame(columns=required_columns)
+    data = _worksheet.get_all_records()
+    if not data: return pd.DataFrame(columns=required_columns)
+    df = pd.DataFrame(data)
+    for col in required_columns:
+        if col not in df.columns: df[col] = pd.NA
+    for col in ['ano', 'gols', 'minutagem']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+    return df[required_columns]
 
-def remover_jogador_sheets(worksheet, row_index):
+def fetch_titulos_data(_worksheet):
+    if not _worksheet: return []
+    return _worksheet.col_values(1)[1:]
+
+# --- Lógica de Carregamento de Dados na Sessão ---
+
+def load_data(force=False):
+    if "data_loaded" not in st.session_state or force:
+        with st.spinner("Buscando dados da planilha..."):
+            spreadsheet = conectar_sheets()
+            if spreadsheet:
+                st.session_state.jogadores_ws = get_worksheet(spreadsheet, "Jogadores", ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem'])
+                st.session_state.titulos_ws = get_worksheet(spreadsheet, "Titulos", ['titulo'])
+                st.session_state.df_jogadores = fetch_jogadores_data(st.session_state.jogadores_ws)
+                st.session_state.lista_titulos = fetch_titulos_data(st.session_state.titulos_ws)
+                st.session_state.data_loaded = True
+
+# --- Funções de Escrita ---
+
+def adicionar_jogador(worksheet, dados):
+    if worksheet:
+        worksheet.append_row(dados)
+        load_data(force=True)
+
+def remover_jogador(worksheet, row_index):
     if worksheet:
         worksheet.delete_rows(row_index)
+        load_data(force=True)
+    
+def adicionar_titulos(worksheet, titulos):
+    if worksheet and titulos:
+        worksheet.append_rows([[t] for t in titulos])
+        load_data(force=True)
 
-# Título principal do aplicativo
-st.markdown('<h1 style="text-align: center; color: #990000; font-weight: bold; font-size: 2.5em;">Convocações Vasco da Gama Sub-20</h1>', unsafe_allow_html=True)
+def adicionar_jogadores_massa(worksheet, df_novos):
+    if worksheet and not df_novos.empty:
+        colunas_ordenadas = ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem']
+        lista_de_listas = df_novos[colunas_ordenadas].values.tolist()
+        worksheet.append_rows(lista_de_listas, value_input_option='USER_ENTERED')
+        load_data(force=True)
 
-# Lógica de login
-SENHA_ADMIN = st.secrets.get("admin_password", "vasco123")
-modo_admin = False
+# --- Início da Interface ---
+
+st.markdown('<h1 style="text-align: center; color: #000000;">Convocações Vasco da Gama Sub-20</h1>', unsafe_allow_html=True)
+
+load_data()
+
+# ===== LÓGICA DE LOGIN CORRIGIDA =====
+SENHA_ADMIN = st.secrets.get("admin_password", "depanalise")
 senha = st.sidebar.text_input("Senha Admin:", type="password")
 
+# Verifica a senha e atualiza o estado da sessão
 if senha == SENHA_ADMIN:
-    modo_admin = True
+    st.session_state.admin_logged_in = True
+else:
+    # Se a senha estiver errada ou vazia, garante que o usuário seja deslogado
+    st.session_state.admin_logged_in = False
+
+# Determina o modo admin baseado no estado da sessão
+modo_admin = st.session_state.get('admin_logged_in', False)
+
+# Exibe as mensagens de status
+if modo_admin:
     st.sidebar.success("Modo Admin Ativo!")
-elif senha:
+elif senha:  # Mostra erro apenas se algo foi digitado e está incorreto
     st.sidebar.error("Senha incorreta.")
 
-# Carrega os dados da planilha
-worksheet = conectar_sheets()
-df_jogadores = listar_jogadores_sheets(worksheet)
 
-# --- Barra lateral e Download ---
+# Barra Lateral
 st.sidebar.header("Opções")
+if st.sidebar.button("🔄 Atualizar Dados"):
+    load_data(force=True)
+    st.toast("Dados atualizados com sucesso!")
+
+df_jogadores = st.session_state.get('df_jogadores', pd.DataFrame())
 if not df_jogadores.empty:
-    st.sidebar.download_button(
-        label="📥 Baixar lista como CSV",
-        data=df_jogadores.to_csv(index=False).encode("utf-8"),
-        file_name="jogadores_convocados.csv",
-        mime="text/csv"
-    )
+    st.sidebar.download_button("📥 Baixar lista como CSV", df_jogadores.to_csv(index=False).encode("utf-8"), "jogadores_convocados.csv")
 
-# --- Conteúdo principal: Visualização ---
+# Conteúdo Principal
 col_tabela, col_grafico = st.columns([0.7, 0.3])
-
 with col_tabela:
-    st.subheader("📋 Jogadores Convocados - Seleção Sub-20")
-    st.subheader("📅 Filtrar jogadores por ano")
-    anos_disponiveis = sorted(df_jogadores["ano"].unique())
-    ano_filtrado = st.selectbox("Escolha o ano", ["Todos"] + anos_disponiveis)
-    busca_nome = st.text_input("Buscar jogador pelo nome")
-    st.subheader("📌 Lista de jogadores")
+    st.subheader("📋 Jogadores Convocados")
     df_filtrado = df_jogadores.copy()
-    if ano_filtrado != "Todos":
-        df_filtrado = df_filtrado[df_filtrado["ano"] == ano_filtrado]
-    if busca_nome:
-        df_filtrado = df_filtrado[df_filtrado["nome"].str.contains(busca_nome, case=False)]
     if not df_filtrado.empty:
+        anos_disponiveis = sorted(df_filtrado["ano"].dropna().unique(), reverse=True)
+        ano_filtrado = st.selectbox("📅 Filtrar por ano:", ["Todos"] + anos_disponiveis)
+        busca_nome = st.text_input("🔎 Buscar jogador pelo nome:")
+        if ano_filtrado != "Todos":
+            df_filtrado = df_filtrado[df_filtrado["ano"] == ano_filtrado]
+        if busca_nome:
+            df_filtrado = df_filtrado[df_filtrado["nome"].str.contains(busca_nome, case=False, na=False)]
         st.dataframe(df_filtrado.sort_values(by=["ano", "nome"]))
     else:
-        st.info("Nenhum jogador encontrado com os filtros aplicados.")
+        st.info("Nenhum jogador cadastrado. Adicione um no modo Admin.")
 
 with col_grafico:
     st.subheader("📈 Estatísticas")
-    st.write("Convocados por ano:")
-    if not df_jogadores.empty:
-        df_grafico = df_jogadores['ano'].value_counts().sort_index()
-        st.bar_chart(df_grafico)
+    if not df_jogadores.empty and not df_jogadores['ano'].dropna().empty:
+        st.write("Convocados por ano:")
+        st.bar_chart(df_jogadores['ano'].value_counts().sort_index())
+    
+    st.subheader("🏆 Títulos da Base")
+    lista_titulos = st.session_state.get('lista_titulos', [])
+    if lista_titulos:
+        contagem = Counter(lista_titulos)
+        display_list = [f"- {t} (x{c})" if c > 1 else f"- {t}" for t, c in sorted(contagem.items())]
+        st.markdown("\n".join(display_list))
     else:
-        st.info("Sem dados para exibir o gráfico.")
-    st.subheader("Informações gerais")
-    total_convocados = len(df_jogadores)
-    total_gols = df_jogadores["gols"].sum() if "gols" in df_jogadores.columns else 0
-    total_minutagem = df_jogadores["minutagem"].sum() if "minutagem" in df_jogadores.columns else 0
+        st.info("Nenhum título cadastrado.")
+    
+    st.subheader("Informações Gerais")
     st.markdown(f"""
-    <div style="background-color:#f0f0f0;padding:10px;border-radius:8px">
-    <b>Total de convocados:</b> {total_convocados}<br>
-    <b>Total de gols marcados:</b> {total_gols}<br>
-    <b>Total de minutagem:</b> {total_minutagem} minutos
+    <div style="background-color:#f0f0f0;padding:10px;border-radius:8px; margin-top: 15px;">
+    <b>Total de convocados:</b> {len(df_jogadores)}<br>
+    <b>Total de gols:</b> {int(df_jogadores["gols"].sum())}<br>
+    <b>Total de minutos:</b> {int(df_jogadores["minutagem"].sum())}
     </div>
     """, unsafe_allow_html=True)
 
-# Se o modo Admin estiver ativo, mostra as opções de gerenciamento
 if modo_admin:
     st.markdown("---")
-    st.subheader("🛠️ Ferramentas de Gerenciamento (Modo Admin)")
-    col_add, col_remove = st.columns(2)
-    with col_add:
-        st.subheader("➕ Adicionar novo jogador")
-        with st.form("adicionar_jogador_form"):
-            nome = st.text_input("Nome do jogador").strip()
-            ano = st.selectbox("Ano da convocação", list(range(2020, 2031)))
-            posicao = st.selectbox("Posição", ["Goleiro", "Zagueiro", "Lateral Direito", "Lateral Esquerdo", "Volante", "Meia Central", "Meia Ofensivo", "Ponta Direita", "Ponta Esquerda", "Centroavante"])
-            competicao = st.selectbox("Competição", ["Mundial", "Sul-Americano", "Outras"])
-            gols = st.number_input("Gols marcados", min_value=0, step=1)
-            minutagem = st.number_input("Minutagem em campo (minutos)", min_value=0, step=1)
-            salvar = st.form_submit_button("Salvar jogador")
-            if salvar:
-                if worksheet:
-                    if nome and competicao:
-                        adicionar_jogador_sheets(worksheet, nome, ano, posicao, competicao, gols, minutagem)
-                        st.success(f"✅ {nome} adicionado com sucesso!")
-                        st.experimental_rerun()
-                    else:
-                        st.warning("⚠️ Nome e Competição são obrigatórios.")
-                else:
-                    st.warning("⚠️ Não foi possível adicionar. Verifique a conexão com a planilha.")
+    st.subheader("🛠️ Ferramentas de Gerenciamento")
+    
+    jogadores_ws = st.session_state.get('jogadores_ws')
+    titulos_ws = st.session_state.get('titulos_ws')
 
-    with col_remove:
-        st.subheader("🗑️ Remover jogador")
-        if not df_jogadores.empty:
-            df_jogadores_com_indice = df_jogadores.reset_index(drop=True).reset_index().rename(columns={'index': 'linha_id'})
-            df_jogadores_com_indice['linha_id'] = df_jogadores_com_indice['linha_id'] + 2
-            opcoes_remocao = df_jogadores_com_indice.apply(lambda j: f"{j['nome']} ({j['ano']}) - {j['posicao']}", axis=1)
-            jogador_selecionado = st.selectbox("Selecione o jogador:", options=[None] + list(opcoes_remocao.index), format_func=lambda i: "Selecione um jogador" if i is None else opcoes_remocao.loc[i])
-            remover = st.button("Remover jogador selecionado")
-            if remover and jogador_selecionado is not None:
-                if worksheet:
-                    row_to_delete = df_jogadores_com_indice.loc[jogador_selecionado, 'linha_id']
-                    remover_jogador_sheets(worksheet, row_to_delete)
-                    st.success(f"✅ Jogador removido com sucesso!")
-                    st.experimental_rerun()
-                else:
-                    st.warning("⚠️ Não foi possível remover. Verifique a conexão com a planilha.")
-        else:
-            st.info("Nenhum jogador para remover.")
+    if jogadores_ws and titulos_ws:
+        with st.expander("➕ Adicionar Jogador"):
+            with st.form("form_add_jogador", clear_on_submit=True):
+                dados = {'nome': st.text_input("Nome").strip(), 'ano': st.selectbox("Ano", list(range(2025, 2019, -1))), 'posicao': st.selectbox("Posição", ["Goleiro", "Zagueiro", "Lateral", "Volante", "Meia", "Ponta", "Atacante"]), 'competicao': st.selectbox("Competição", ["Mundial", "Sul-Americano", "Amistoso", "Outras"]), 'gols': st.number_input("Gols", 0, 100, 0, 1), 'minutagem': st.number_input("Minutos", 0, 5000, 0, 1)}
+                if st.form_submit_button("Salvar Jogador"):
+                    if dados['nome']:
+                        row_to_add = [dados['nome'], dados['ano'], dados['posicao'], dados['competicao'], dados['gols'], dados['minutagem']]
+                        adicionar_jogador(jogadores_ws, row_to_add)
+                        st.success(f"✅ {dados['nome']} adicionado!")
+                        st.rerun()
+                    else: st.warning("⚠️ Nome é obrigatório.")
+
+        with st.expander("⬆️ Adicionar em Massa (CSV)"):
+            modelo_csv = pd.DataFrame([{'nome':'', 'ano':'', 'posicao':'', 'competicao':'', 'gols':'', 'minutagem':''}])
+            st.download_button("Baixar modelo CSV", modelo_csv.to_csv(index=False).encode('utf-8'), 'modelo_convocados.csv', 'text/csv')
+            
+            csv_file = st.file_uploader("Escolha um arquivo CSV para upload", type="csv")
+            if csv_file is not None:
+                if st.button("Carregar dados do CSV"):
+                    try:
+                        df_novos = pd.read_csv(csv_file)
+                        df_novos = df_novos.fillna('')
+                        colunas_obrigatorias = {'nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem'}
+                        if colunas_obrigatorias.issubset(df_novos.columns):
+                            adicionar_jogadores_massa(jogadores_ws, df_novos)
+                            st.success(f"✅ {len(df_novos)} jogadores adicionados com sucesso!")
+                            st.rerun()
+                        else:
+                            st.error(f"O arquivo CSV não tem as colunas obrigatórias. Verifique o modelo.")
+                    except Exception as e:
+                        st.error(f"Ocorreu um erro ao processar o arquivo: {e}")
+
+        with st.expander("🏆 Adicionar Títulos"):
+            with st.form("form_add_titulos", clear_on_submit=True):
+                titulos_predef = sorted(["Brasileiro", "Carioca", "Copa do Brasil", "Libertadores", "Copa Rio"])
+                quantidades = {t: st.number_input(t, 0, 10, 0, 1) for t in titulos_predef}
+                custom = st.text_input("Outro Título:")
+                if st.form_submit_button("Adicionar Títulos"):
+                    para_add = [t for t, q in quantidades.items() for _ in range(q)]
+                    if custom: para_add.append(custom)
+                    adicionar_titulos(titulos_ws, para_add)
+                    st.success("Títulos atualizados!")
+                    st.rerun()
+
+        with st.expander("🗑️ Remover Jogador"):
+            df_remover = df_jogadores.copy()
+            if not df_remover.empty:
+                df_remover['display'] = df_remover.apply(lambda r: f"{r['nome']} ({r['ano']})", axis=1)
+                idx_para_remover = st.selectbox("Selecione para remover:", options=df_remover.index, format_func=lambda i: df_remover.loc[i, 'display'], index=None, placeholder="Selecione um jogador...")
+                if st.button("Remover Jogador Selecionado") and idx_para_remover is not None:
+                    remover_jogador(jogadores_ws, int(idx_para_remover + 2))
+                    st.success(f"✅ Jogador removido!")
+                    st.rerun()
+    else:
+        st.warning("Não foi possível carregar as ferramentas de admin. Tente atualizar os dados.")
