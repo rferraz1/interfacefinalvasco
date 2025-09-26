@@ -22,16 +22,6 @@ JOGADORES_COLS = ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem', '
 TITULOS_COLS = ['titulo', 'categoria']
 NUMERIC_COLS = ['ano', 'gols', 'minutagem']
 
-CUSTOM_CSS = """
-    <style>
-    body, * {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    }
-    h1, h2, h3 { color: #000000; font-weight: bold; }
-    .stApp { background-color: #ffffff; }
-    </style>
-"""
-
 # --- FUNÇÕES DE INTERAÇÃO COM GOOGLE SHEETS ---
 
 @st.cache_resource(ttl=3600)
@@ -44,6 +34,17 @@ def conectar_sheets() -> Optional[gspread.Spreadsheet]:
     except Exception as e:
         st.error(f"Erro de conexão com a planilha: {e}")
         return None
+
+# Movido para cá para evitar o erro de tokenização com o cache do Streamlit
+CUSTOM_CSS = """
+    <style>
+    body, * {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    h1, h2, h3 { color: #000000; font-weight: bold; }
+    .stApp { background-color: #ffffff; }
+    </style>
+"""
 
 def get_worksheet(spreadsheet: gspread.Spreadsheet, name: str) -> Optional[gspread.Worksheet]:
     try:
