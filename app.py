@@ -1,216 +1,272 @@
+# -*- coding: utf-8 -*-
+"""
+Dashboard Streamlit para visualização e gerenciamento de convocações
+de jogadores da base do Club de Regatas Vasco da Gama.
+Os dados são lidos e escritos em uma Planilha Google.
+"""
+
 import streamlit as st
 import pandas as pd
 import gspread
-import io
+from typing import List, Dict, Optional
 
-# ⚽ Configuração da página
-st.set_page_config(
-    page_title="Convocações da Base - Vasco",
-    page_icon="⚽",
-    layout="wide"
-)
+# --- CONSTANTES DE CONFIGURAÇÃO ---
 
-# 🎨 Estilo personalizado
-st.markdown("""
+PAGE_CONFIG = {
+    "page_title": "Convocações da Base - Vasco",
+    "page_icon": "⚽",
+    "layout": "wide"
+}
+
+JOGADORES_COLS = ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem', 'categoria']
+TITULOS_COLS = ['titulo', 'categoria']
+NUMERIC_COLS = ['ano', 'gols', 'minutagem']
+
+CUSTOM_CSS = """
     <style>
     body, * {
-        color: #000000 !important;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
-    h2, h3 { color: #000000; font-weight: bold; }
+    h1, h2, h3 { color: #000000; font-weight: bold; }
     .stApp { background-color: #ffffff; }
     </style>
-""", unsafe_allow_html=True)
+"""
 
-# --- Funções de Conexão e Leitura ---
+# --- FUNÇÕES DE INTERAÇÃO COM GOOGLE SHEETS ---
 
-@st.cache_resource
-def conectar_sheets():
+@st.cache_resource(ttl=3600)
+def conectar_sheets() -> Optional[gspread.Spreadsheet]:
     try:
         creds = st.secrets["gcp_service_account"]
         gc = gspread.service_account_from_dict(creds)
         sheet_url = st.secrets["google_sheets"]["sheet_url"]
         return gc.open_by_url(sheet_url)
     except Exception as e:
-        st.error(f"Erro de conexão com a planilha: {e}"); return None
+        st.error(f"Erro de conexão com a planilha: {e}")
+        return None
 
-def get_worksheet(sheet, name, headers):
+def get_worksheet(spreadsheet: gspread.Spreadsheet, name: str) -> Optional[gspread.Worksheet]:
     try:
-        worksheet = sheet.worksheet(name)
-        if headers and not worksheet.acell('A1').value:
-            worksheet.update('A1', [headers])
-        return worksheet
+        return spreadsheet.worksheet(name)
     except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Aba '{name}' não encontrada."); return None
+        st.error(f"Aba '{name}' não encontrada na planilha. Verifique o nome.")
+        return None
 
-def fetch_data(worksheet, required_columns, default_fills=None):
+def fetch_data(worksheet: Optional[gspread.Worksheet], required_columns: List[str]) -> pd.DataFrame:
     if not worksheet: return pd.DataFrame(columns=required_columns)
-    data = worksheet.get_all_records()
-    if not data: return pd.DataFrame(columns=required_columns)
-    
-    df = pd.DataFrame(data)
-
-    # Linha de blindagem para ignorar colunas fantasmas
-    if '' in df.columns:
-        df = df.drop(columns=[''])
-    
-    df.columns = df.columns.str.lower().str.strip()
-    
-    # Mantém apenas as colunas oficiais para evitar erros
-    cols_to_keep = [col for col in required_columns if col in df.columns]
-    df = df[cols_to_keep]
-    
-    for col in required_columns:
-        if col not in df.columns: df[col] = pd.NA
-            
-    if default_fills:
-        for col, value in default_fills.items():
+    try:
+        data = worksheet.get_all_records()
+        if not data: return pd.DataFrame(columns=required_columns)
+        df = pd.DataFrame(data)
+        if '' in df.columns: df = df.drop(columns=[''])
+        df.columns = df.columns.str.lower().str.strip()
+        for col in required_columns:
+            if col not in df.columns: df[col] = pd.NA
+        for col in NUMERIC_COLS:
             if col in df.columns:
-                df[col] = df[col].fillna(value)
-                
-    numeric_cols = ['ano', 'gols', 'minutagem']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
-            
-    return df
+                df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+        return df[required_columns]
+    except Exception as e:
+        st.error(f"Erro ao processar dados da aba '{worksheet.title}': {e}")
+        return pd.DataFrame(columns=required_columns)
 
-# --- Lógica de Carregamento ---
-def load_data(force=False):
-    if "data_loaded" not in st.session_state or force:
-        with st.spinner("Buscando dados da planilha..."):
-            spreadsheet = conectar_sheets()
-            if spreadsheet:
-                st.session_state.jogadores_ws = get_worksheet(spreadsheet, "Jogadores", ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem', 'categoria'])
-                st.session_state.titulos_ws = get_worksheet(spreadsheet, "Titulos", ['titulo', 'categoria'])
-                
-                st.session_state.df_jogadores = fetch_data(st.session_state.jogadores_ws, 
-                                                           ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem', 'categoria'], 
-                                                           {'categoria': 'Sub-20'})
-                st.session_state.df_titulos = fetch_data(st.session_state.titulos_ws, ['titulo', 'categoria'])
-                st.session_state.data_loaded = True
-
-# --- Funções de Escrita ---
-def adicionar_jogadores_massa(worksheet, df_novos):
-    df_atual = st.session_state.get('df_jogadores', pd.DataFrame())
-    for col in ['ano', 'gols', 'minutagem']:
-        if col in df_atual.columns:
-            df_atual[col] = pd.to_numeric(df_atual[col], errors='coerce').astype('Int64')
-    df_atualizado = pd.concat([df_atual, df_novos], ignore_index=True)
-    st.session_state.df_jogadores = df_atualizado
-    
-    if worksheet and not df_novos.empty:
-        colunas_ordenadas = ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem', 'categoria']
-        df_para_enviar = pd.DataFrame()
-        for col in colunas_ordenadas:
-            if col in df_novos.columns:
-                df_para_enviar[col] = df_novos[col]
-            else:
-                df_para_enviar[col] = ''
+def adicionar_jogadores_massa(worksheet: gspread.Worksheet, df_novos: pd.DataFrame):
+    try:
+        df_para_enviar = df_novos.reindex(columns=JOGADORES_COLS, fill_value='')
         lista_para_enviar = df_para_enviar.fillna('').values.tolist()
         worksheet.append_rows(lista_para_enviar, value_input_option='USER_ENTERED')
+        return True
+    except Exception as e:
+        st.error(f"Erro ao enviar dados para a planilha: {e}")
+        return False
 
-# --- Início da Interface ---
-st.markdown('<h1 style="text-align: center; color: #000000;">Convocações da Base - Vasco da Gama</h1>', unsafe_allow_html=True)
-load_data()
+# --- FUNÇÕES DE LÓGICA DO APP ---
 
-# Lógica de Login
-SENHA_ADMIN = st.secrets.get("admin_password", "depanalise")
-senha = st.sidebar.text_input("Senha Admin:", type="password")
-st.session_state.admin_logged_in = senha == SENHA_ADMIN
-modo_admin = st.session_state.get('admin_logged_in', False)
+def load_all_data(force_refresh: bool = False):
+    if "data_loaded" in st.session_state and not force_refresh: return
+    with st.spinner("Buscando e atualizando dados da planilha..."):
+        spreadsheet = conectar_sheets()
+        if spreadsheet:
+            st.session_state.jogadores_ws = get_worksheet(spreadsheet, "Jogadores")
+            st.session_state.titulos_ws = get_worksheet(spreadsheet, "Titulos")
+            st.session_state.df_jogadores = fetch_data(st.session_state.get('jogadores_ws'), JOGADORES_COLS)
+            st.session_state.df_titulos = fetch_data(st.session_state.get('titulos_ws'), TITULOS_COLS)
+            st.session_state.data_loaded = True
 
-if modo_admin: st.sidebar.success("Modo Admin Ativo!")
-elif senha: st.sidebar.error("Senha incorreta.")
+def authenticate_admin():
+    senha_correta = st.secrets.get("admin_password", "depanalise")
+    senha_digitada = st.sidebar.text_input("Senha Admin:", type="password", key="admin_password_input")
+    if senha_digitada:
+        if senha_digitada == senha_correta:
+            st.session_state.admin_logged_in = True
+            st.sidebar.success("Modo Admin Ativo!")
+        else:
+            st.session_state.admin_logged_in = False
+            st.sidebar.error("Senha incorreta.")
+    else:
+        st.session_state.admin_logged_in = False
 
-# Barra Lateral
-st.sidebar.header("Opções")
-if st.sidebar.button("🔄 Atualizar Dados da Planilha"): 
-    st.cache_resource.clear()
-    load_data(force=True)
-    st.toast("Dados atualizados!")
-df_para_download = st.session_state.get('df_jogadores', pd.DataFrame())
-if not df_para_download.empty:
-    st.sidebar.download_button("📥 Baixar CSV Jogadores", df_para_download.to_csv(index=False).encode("utf-8"), "jogadores_convocados.csv")
+# --- FUNÇÕES DE RENDERIZAÇÃO DA INTERFACE ---
 
-# Filtros
-st.sidebar.header("Filtros")
-df_jogadores = st.session_state.get('df_jogadores', pd.DataFrame())
-if not df_jogadores.empty:
-    categorias_disponiveis = sorted(df_jogadores["categoria"].dropna().unique())
-else:
-    categorias_disponiveis = []
-categoria_filtrada = st.sidebar.selectbox("📂 Filtrar por categoria:", ["Todas"] + categorias_disponiveis)
-if not df_jogadores.empty and categoria_filtrada != "Todas":
-    df_filtrado = df_jogadores[df_jogadores["categoria"] == categoria_filtrada]
-else:
-    df_filtrado = df_jogadores.copy() 
-
-# Conteúdo Principal
-if df_filtrado.empty:
-    st.info("Nenhum jogador cadastrado ou correspondente ao filtro.")
-else:
-    tab_jogadores, tab_estatisticas = st.tabs(["📋 Jogadores Convocados", "📊 Estatísticas e Títulos"])
-    with tab_jogadores:
-        st.dataframe(df_filtrado.sort_values(by=["ano", "nome"]), use_container_width=True)
-        st.subheader("Informações Gerais (de acordo com os filtros)")
-        st.markdown(f"""<div style="background-color:#f0f0f0;padding:10px;border-radius:8px;">
-        <b>Total de convocações:</b> {len(df_filtrado)}<br>
-        <b>Total de gols:</b> {int(df_filtrado["gols"].sum())}<br>
-        <b>Total de minutos:</b> {int(df_filtrado["minutagem"].sum())}</div>""", unsafe_allow_html=True)
-    with tab_estatisticas:
-        col_graficos, col_titulos = st.columns([0.6, 0.4])
-        with col_graficos:
-            st.subheader("📈 Estatísticas (de acordo com os filtros)")
-            st.write("Convocados por ano:"); st.bar_chart(df_filtrado['ano'].value_counts().sort_index())
-            st.write("Convocados por competição:"); st.bar_chart(df_filtrado['competicao'].value_counts())
-        with col_titulos:
-            st.subheader("🏆 Títulos da Base")
-            df_titulos = st.session_state.get('df_titulos', pd.DataFrame())
-            if not df_titulos.empty:
-                if 'categoria' not in df_titulos.columns:
-                    st.error("A coluna 'categoria' não foi encontrada na sua planilha 'Titulos'.")
-                else:
-                    df_titulos_filtrado = df_titulos
-                    if categoria_filtrada != "Todas":
-                        df_titulos_filtrado = df_titulos[df_titulos['categoria'] == categoria_filtrada]
-                    if not df_titulos_filtrado.empty:
-                        if categoria_filtrada == "Todas":
-                            for cat, group in df_titulos_filtrado.groupby('categoria'):
-                                st.markdown(f"**{cat}**"); [st.markdown(f"- {titulo}") for titulo in sorted(group['titulo'])]
-                        else:
-                            for titulo in sorted(df_titulos_filtrado['titulo']): st.markdown(f"- {titulo}")
-                    else: st.info("Nenhum título para a categoria selecionada.")
-
-# Ferramentas de Admin
-if modo_admin:
+def render_sidebar_filters(df_jogadores: pd.DataFrame) -> Dict:
+    """Renderiza os filtros na barra lateral e retorna os valores selecionados."""
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🛠️ Ferramentas de Gerenciamento")
-    jogadores_ws = st.session_state.get('jogadores_ws')
-    if jogadores_ws:
-        with st.sidebar.expander("⬆️ Adicionar em Massa (CSV)"):
-            modelo_csv = pd.DataFrame([{'nome':'', 'ano':'', 'posicao':'', 'competicao':'', 'gols':'', 'minutagem':'', 'categoria':''}])
-            st.download_button(label="Baixar modelo CSV", data=modelo_csv.to_csv(index=False, sep=',', encoding='utf-8').encode('utf-8'), file_name='modelo_convocados.csv', mime='text/csv')
-            
-            if 'uploader_key' not in st.session_state: st.session_state.uploader_key = 0
-            csv_file = st.file_uploader("Selecione o arquivo CSV", type="csv", key=st.session_state.uploader_key)
-            
-            if csv_file is not None:
-                if st.button("Enviar Arquivo CSV"):
-                    try:
-                        df_novos = pd.read_csv(csv_file, sep=',', encoding='utf-8')
-                        df_novos.columns = df_novos.columns.str.strip().str.lower()
-                        colunas_necessarias = ['nome', 'ano', 'posicao', 'competicao', 'gols', 'minutagem', 'categoria']
-                        colunas_faltando = [col for col in colunas_necessarias if col not in df_novos.columns]
-                        if colunas_faltando:
-                            st.error(f"Erro no CSV! Colunas não encontradas: {', '.join(colunas_faltando)}")
-                        else:
-                            for col in ['ano', 'gols', 'minutagem']:
-                                df_novos[col] = pd.to_numeric(df_novos[col], errors='coerce').astype('Int64')
-                            adicionar_jogadores_massa(jogadores_ws, df_novos)
-                            st.success(f"✅ {len(df_novos)} jogadores adicionados!")
-                            st.session_state.uploader_key += 1
+    st.sidebar.header("Filtros de Visualização")
+
+    # Filtro por nome
+    nome_filtrado = st.sidebar.text_input("🔎 Filtrar por nome:")
+
+    # Filtro por categoria
+    categorias = ["Todas"] + sorted(df_jogadores["categoria"].dropna().unique())
+    categoria_selecionada = st.sidebar.selectbox("📂 Filtrar por categoria:", options=categorias)
+
+    # Filtro por posição
+    posicoes = ["Todas"] + sorted(df_jogadores["posicao"].dropna().unique())
+    posicao_selecionada = st.sidebar.selectbox("🏃 Filtrar por posição:", options=posicoes)
+
+    # Filtro por competição
+    competicoes = ["Todas"] + sorted(df_jogadores["competicao"].dropna().unique())
+    competicao_selecionada = st.sidebar.selectbox("🏆 Filtrar por competição:", options=competicoes)
+
+    return {
+        "nome": nome_filtrado,
+        "categoria": categoria_selecionada,
+        "posicao": posicao_selecionada,
+        "competicao": competicao_selecionada
+    }
+
+def render_jogadores_page(df_jogadores: pd.DataFrame):
+    """Renderiza a página principal com a lista de jogadores e estatísticas."""
+    
+    filtros = render_sidebar_filters(df_jogadores)
+    df_filtrado = df_jogadores.copy()
+
+    # Aplica os filtros
+    if filtros["nome"]:
+        df_filtrado = df_filtrado[df_filtrado["nome"].str.contains(filtros["nome"], case=False, na=False)]
+    if filtros["categoria"] != "Todas":
+        df_filtrado = df_filtrado[df_filtrado["categoria"] == filtros["categoria"]]
+    if filtros["posicao"] != "Todas":
+        df_filtrado = df_filtrado[df_filtrado["posicao"] == filtros["posicao"]]
+    if filtros["competicao"] != "Todas":
+        df_filtrado = df_filtrado[df_filtrado["competicao"] == filtros["competicao"]]
+
+    if df_filtrado.empty:
+        st.info("Nenhum jogador encontrado para os filtros selecionados.")
+        return
+
+    tab_jogadores, tab_estatisticas = st.tabs(["📋 Jogadores Convocados", "📊 Estatísticas"])
+
+    with tab_jogadores:
+        st.dataframe(df_filtrado.sort_values(by=["ano", "nome"]), use_container_width=True, hide_index=True)
+        st.subheader("Resumo dos Dados Filtrados")
+        total_convocacoes = len(df_filtrado)
+        total_gols = int(df_filtrado["gols"].sum())
+        total_minutos = int(df_filtrado["minutagem"].sum())
+        st.markdown(f"""
+        <div style="background-color:#f0f0f0;padding:12px;border-radius:8px;">
+            <b>Total de convocações:</b> {total_convocacoes}<br>
+            <b>Total de gols:</b> {total_gols}<br>
+            <b>Total de minutos jogados:</b> {total_minutos}
+        </div>
+        """, unsafe_allow_html=True)
+
+    with tab_estatisticas:
+        st.subheader("📈 Estatísticas Visuais")
+        st.write("Convocados por ano:")
+        st.bar_chart(df_filtrado['ano'].value_counts().sort_index())
+        st.write("Convocados por competição:")
+        st.bar_chart(df_filtrado['competicao'].value_counts())
+
+def render_titulos_page(df_titulos: pd.DataFrame):
+    """Renderiza a página dedicada à exibição de títulos."""
+    st.header("🏆 Títulos da Base")
+
+    if df_titulos.empty:
+        st.info("Nenhum título cadastrado.")
+        return
+        
+    categorias_disponiveis = ["Todas"] + sorted(df_titulos["categoria"].dropna().unique())
+    categoria_filtrada = st.selectbox("Filtrar por categoria:", options=categorias_disponiveis)
+    
+    df_titulos_filtrado = df_titulos
+    if categoria_filtrada != "Todas":
+        df_titulos_filtrado = df_titulos[df_titulos['categoria'] == categoria_filtrada]
+
+    if df_titulos_filtrado.empty:
+        st.info("Nenhum título para a categoria selecionada.")
+    elif categoria_filtrada == "Todas":
+        for cat, group in df_titulos_filtrado.sort_values(by='categoria').groupby('categoria'):
+            st.markdown(f"### {cat}")
+            for titulo in sorted(group['titulo']):
+                st.markdown(f"- {titulo}")
+    else:
+        for titulo in sorted(df_titulos_filtrado['titulo']):
+            st.markdown(f"- {titulo}")
+
+def render_admin_tools():
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🛠️ Ferramentas de Admin")
+    with st.sidebar.expander("⬆️ Adicionar em Massa (via CSV)"):
+        modelo_csv = pd.DataFrame(columns=JOGADORES_COLS)
+        st.download_button(label="Baixar modelo CSV", data=modelo_csv.to_csv(index=False).encode('utf-8'),
+                           file_name='modelo_convocados.csv', mime='text/csv')
+        uploaded_file = st.file_uploader("Selecione o arquivo CSV", type="csv",
+                                         key=f"uploader_{st.session_state.get('uploader_key', 0)}")
+        if uploaded_file:
+            if st.button("Enviar e Adicionar Jogadores"):
+                try:
+                    df_novos = pd.read_csv(uploaded_file, sep=',')
+                    df_novos.columns = df_novos.columns.str.lower().str.strip()
+                    colunas_faltando = [col for col in JOGADORES_COLS if col not in df_novos.columns]
+                    if colunas_faltando:
+                        st.error(f"Erro no CSV! Colunas não encontradas: {', '.join(colunas_faltando)}")
+                    else:
+                        for col in NUMERIC_COLS:
+                            df_novos[col] = pd.to_numeric(df_novos[col], errors='coerce').astype('Int64')
+                        if adicionar_jogadores_massa(st.session_state.jogadores_ws, df_novos):
+                            st.success(f"✅ {len(df_novos)} jogadores adicionados com sucesso!")
+                            st.session_state.uploader_key = st.session_state.get('uploader_key', 0) + 1
+                            load_all_data(force_refresh=True)
                             st.rerun()
-                    except Exception as e:
-                        st.error(f"Ocorreu um erro ao processar o arquivo: {e}")
-        # Outras ferramentas de admin (Adicionar Jogador, Títulos, Remover Jogador) podem ser adicionadas aqui.
+                except Exception as e:
+                    st.error(f"Ocorreu um erro ao processar o arquivo: {e}")
+
+# --- EXECUÇÃO PRINCIPAL DO SCRIPT ---
+
+def main():
+    st.set_page_config(**PAGE_CONFIG)
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+    st.markdown('<h1 style="text-align: center;">Convocações da Base - Vasco da Gama</h1>', unsafe_allow_html=True)
+    
+    load_all_data()
+
+    # --- Sidebar Principal ---
+    st.sidebar.header("Navegação")
+    pagina_selecionada = st.sidebar.radio("Escolha a página:", ["Jogadores", "Títulos"])
+
+    if st.sidebar.button("🔄 Atualizar Dados da Planilha"):
+        load_all_data(force_refresh=True)
+        st.toast("Dados atualizados com sucesso!")
+        st.rerun()
+
+    df_jogadores = st.session_state.get('df_jogadores', pd.DataFrame())
+    if not df_jogadores.empty:
+        csv_data = df_jogadores.to_csv(index=False).encode("utf-8")
+        st.sidebar.download_button("📥 Baixar CSV (Jogadores)", data=csv_data, file_name="jogadores_convocados_vasco.csv")
+    
+    authenticate_admin()
+
+    # --- Renderização da Página Selecionada ---
+    if pagina_selecionada == "Jogadores":
+        render_jogadores_page(df_jogadores)
+    elif pagina_selecionada == "Títulos":
+        df_titulos = st.session_state.get('df_titulos', pd.DataFrame())
+        render_titulos_page(df_titulos)
+
+    if st.session_state.get('admin_logged_in', False):
+        render_admin_tools()
+
+if __name__ == "__main__":
+    main()
+
