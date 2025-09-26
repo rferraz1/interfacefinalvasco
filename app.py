@@ -27,6 +27,10 @@ NUMERIC_COLS = ['ano', 'gols', 'minutagem']
 @st.cache_resource(ttl=3600)
 def conectar_sheets() -> Optional[gspread.Spreadsheet]:
     try:
+        # A verificação de 'gcp_service_account' em st.secrets agora é mais segura
+        if "gcp_service_account" not in st.secrets or "google_sheets" not in st.secrets:
+            st.error("Configuração de segredos (secrets) incompleta. Verifique 'gcp_service_account' e 'google_sheets'.")
+            return None
         creds = st.secrets["gcp_service_account"]
         gc = gspread.service_account_from_dict(creds)
         sheet_url = st.secrets["google_sheets"]["sheet_url"]
@@ -81,6 +85,15 @@ def adicionar_jogadores_massa(worksheet: gspread.Worksheet, df_novos: pd.DataFra
         st.error(f"Erro ao enviar dados para a planilha: {e}")
         return False
 
+def adicionar_titulo(worksheet: gspread.Worksheet, titulo: str, categoria: str) -> bool:
+    """Adiciona uma nova linha na aba de Títulos."""
+    try:
+        worksheet.append_row([titulo, categoria], value_input_option='USER_ENTERED')
+        return True
+    except Exception as e:
+        st.error(f"Erro ao adicionar título na planilha: {e}")
+        return False
+
 # --- FUNÇÕES DE LÓGICA DO APP ---
 
 def load_all_data(force_refresh: bool = False):
@@ -93,6 +106,11 @@ def load_all_data(force_refresh: bool = False):
             st.session_state.df_jogadores = fetch_data(st.session_state.get('jogadores_ws'), JOGADORES_COLS)
             st.session_state.df_titulos = fetch_data(st.session_state.get('titulos_ws'), TITULOS_COLS)
             st.session_state.data_loaded = True
+        else:
+            # Garante que DataFrames vazios sejam criados se a conexão falhar
+            st.session_state.df_jogadores = pd.DataFrame(columns=JOGADORES_COLS)
+            st.session_state.df_titulos = pd.DataFrame(columns=TITULOS_COLS)
+
 
 def authenticate_admin():
     senha_correta = st.secrets.get("admin_password", "depanalise")
@@ -114,17 +132,19 @@ def render_sidebar_filters(df_jogadores: pd.DataFrame) -> Dict:
     st.sidebar.markdown("---")
     st.sidebar.header("Filtros de Visualização")
 
+    # Adiciona uma verificação para evitar erro se a planilha não for carregada
+    if df_jogadores.empty:
+        st.sidebar.warning("Dados dos jogadores não disponíveis. Verifique a conexão com a planilha.")
+        return {"nome": "", "categoria": "Todas", "posicao": "Todas", "competicao": "Todas"}
+
     # Filtro por nome
     nome_filtrado = st.sidebar.text_input("🔎 Filtrar por nome:")
-
     # Filtro por categoria
     categorias = ["Todas"] + sorted(df_jogadores["categoria"].dropna().unique())
     categoria_selecionada = st.sidebar.selectbox("📂 Filtrar por categoria:", options=categorias)
-
     # Filtro por posição
     posicoes = ["Todas"] + sorted(df_jogadores["posicao"].dropna().unique())
     posicao_selecionada = st.sidebar.selectbox("🏃 Filtrar por posição:", options=posicoes)
-
     # Filtro por competição
     competicoes = ["Todas"] + sorted(df_jogadores["competicao"].dropna().unique())
     competicao_selecionada = st.sidebar.selectbox("🏆 Filtrar por competição:", options=competicoes)
@@ -140,8 +160,13 @@ def render_jogadores_page(df_jogadores: pd.DataFrame):
     """Renderiza a página principal com a lista de jogadores e estatísticas."""
     
     filtros = render_sidebar_filters(df_jogadores)
-    df_filtrado = df_jogadores.copy()
+    
+    # Se o df estiver vazio, não há necessidade de filtrar ou exibir nada.
+    if df_jogadores.empty:
+        st.warning("Não foi possível carregar os dados dos jogadores. Verifique a conexão e as configurações.")
+        return
 
+    df_filtrado = df_jogadores.copy()
     # Aplica os filtros
     if filtros["nome"]:
         df_filtrado = df_filtrado[df_filtrado["nome"].str.contains(filtros["nome"], case=False, na=False)]
@@ -157,7 +182,6 @@ def render_jogadores_page(df_jogadores: pd.DataFrame):
         return
 
     tab_jogadores, tab_estatisticas = st.tabs(["📋 Jogadores Convocados", "📊 Estatísticas"])
-
     with tab_jogadores:
         st.dataframe(df_filtrado.sort_values(by=["ano", "nome"]), use_container_width=True, hide_index=True)
         st.subheader("Resumo dos Dados Filtrados")
@@ -182,18 +206,15 @@ def render_jogadores_page(df_jogadores: pd.DataFrame):
 def render_titulos_page(df_titulos: pd.DataFrame):
     """Renderiza a página dedicada à exibição de títulos."""
     st.header("🏆 Títulos da Base")
-
     if df_titulos.empty:
-        st.info("Nenhum título cadastrado.")
+        st.info("Nenhum título cadastrado ou não foi possível carregar os dados.")
         return
         
     categorias_disponiveis = ["Todas"] + sorted(df_titulos["categoria"].dropna().unique())
     categoria_filtrada = st.selectbox("Filtrar por categoria:", options=categorias_disponiveis)
-    
     df_titulos_filtrado = df_titulos
     if categoria_filtrada != "Todas":
         df_titulos_filtrado = df_titulos[df_titulos['categoria'] == categoria_filtrada]
-
     if df_titulos_filtrado.empty:
         st.info("Nenhum título para a categoria selecionada.")
     elif categoria_filtrada == "Todas":
@@ -208,6 +229,7 @@ def render_titulos_page(df_titulos: pd.DataFrame):
 def render_admin_tools():
     st.sidebar.markdown("---")
     st.sidebar.subheader("🛠️ Ferramentas de Admin")
+    
     with st.sidebar.expander("⬆️ Adicionar em Massa (via CSV)"):
         modelo_csv = pd.DataFrame(columns=JOGADORES_COLS)
         st.download_button(label="Baixar modelo CSV", data=modelo_csv.to_csv(index=False).encode('utf-8'),
@@ -233,6 +255,24 @@ def render_admin_tools():
                 except Exception as e:
                     st.error(f"Ocorreu um erro ao processar o arquivo: {e}")
 
+    with st.sidebar.expander("🏆 Adicionar Título"):
+        novo_titulo = st.text_input("Nome do Título:", key="titulo_input")
+        categoria_titulo = st.text_input("Categoria do Título:", key="categoria_titulo_input", help="Ex: Sub-20, Sub-17, etc.")
+        
+        if st.button("Salvar Novo Título"):
+            if novo_titulo and categoria_titulo and st.session_state.get('titulos_ws'):
+                if adicionar_titulo(st.session_state.titulos_ws, novo_titulo, categoria_titulo):
+                    st.success(f"🏆 Título '{novo_titulo}' adicionado!")
+                    # Limpa os campos de texto após o envio
+                    st.session_state.titulo_input = ""
+                    st.session_state.categoria_titulo_input = ""
+                    load_all_data(force_refresh=True)
+                    st.rerun()
+            elif not st.session_state.get('titulos_ws'):
+                st.error("Aba de títulos não foi encontrada. Não é possível adicionar.")
+            else:
+                st.warning("Por favor, preencha o nome do título e a categoria.")
+
 # --- EXECUÇÃO PRINCIPAL DO SCRIPT ---
 
 def main():
@@ -245,7 +285,6 @@ def main():
     # --- Sidebar Principal ---
     st.sidebar.header("Navegação")
     pagina_selecionada = st.sidebar.radio("Escolha a página:", ["Jogadores", "Títulos"])
-
     if st.sidebar.button("🔄 Atualizar Dados da Planilha"):
         load_all_data(force_refresh=True)
         st.toast("Dados atualizados com sucesso!")
